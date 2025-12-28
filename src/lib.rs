@@ -12,7 +12,13 @@ struct BlockMeta {
     next: *mut BlockMeta,
 }
 
-static BASE: AtomicPtr<BlockMeta> = AtomicPtr::new(ptr::null_mut());
+static mut DUMMY_HEAD: BlockMeta = BlockMeta {
+    size: 0,
+    is_free: false,
+    next: ptr::null_mut(),
+};
+
+static BASE: AtomicPtr<BlockMeta> = AtomicPtr::new(&raw mut DUMMY_HEAD);
 
 impl BlockMeta {
     fn find_free_block(size: usize) -> (*mut Self, *mut Self) {
@@ -47,16 +53,6 @@ impl BlockMeta {
     }
 
     fn claim_block(size: usize) -> *mut Self {
-        if BASE.load(Ordering::Acquire).is_null() {
-            let block = BlockMeta::request_space(size);
-            if block.is_null() {
-                return ptr::null_mut();
-            }
-
-            BASE.store(block, Ordering::Release);
-            return block;
-        }
-
         let (block, last) = BlockMeta::find_free_block(size);
         if block.is_null() {
             let block = BlockMeta::request_space(size);
@@ -129,7 +125,10 @@ pub extern "C" fn free(ptr: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn calloc(num: usize, size: usize) -> *mut c_void {
-    let layout = Layout::from_size_align(num * size, mem::align_of::<usize>()).unwrap();
+    let Some(total_size) = num.checked_mul(size) else {
+        return ptr::null_mut();
+    };
+    let layout = Layout::from_size_align(total_size, mem::align_of::<usize>()).unwrap();
     (unsafe { BasicAllocator.alloc_zeroed(layout) } as *mut c_void)
 }
 
@@ -137,6 +136,11 @@ pub extern "C" fn calloc(num: usize, size: usize) -> *mut c_void {
 pub extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     if ptr.is_null() {
         return malloc(size);
+    }
+
+    if size == 0 {
+        free(ptr);
+        return ptr::null_mut();
     }
 
     let meta_ptr = BlockMeta::get_meta_ptr(ptr as *mut u8);
